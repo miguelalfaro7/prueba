@@ -2,20 +2,17 @@
 package com.example.iot.sensorproducer;
 
 import java.time.Instant;
-import java.util.LinkedHashMap;
-import java.util.Map;
 import java.util.concurrent.ThreadLocalRandom;
 
-import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
+import com.example.iot.sensorproducer.dto.SensorReadingEvent;
 
 @Component
 public class SensorSimulator {
 
-    private final KafkaTemplate<String, Object> kafkaTemplate;
+    private final ReadingPublisher publisher;
 
-    private static final String TOPIC = "sensor_data";
 
     private static final String[] SENSORS = {
         "sensor_A", "sensor_B", "sensor_C", "sensor_D",
@@ -23,8 +20,8 @@ public class SensorSimulator {
         "sensor_I", "sensor_J"
     };
 
-    public SensorSimulator(KafkaTemplate<String, Object> kafkaTemplate) {
-        this.kafkaTemplate = kafkaTemplate;
+    public SensorSimulator(ReadingPublisher publisher) {
+        this.publisher = publisher;
     }
 
     @Scheduled(fixedRate = 2000)
@@ -34,12 +31,13 @@ public class SensorSimulator {
 
             double vibration = generateVibration();
 
-            Map<String, Object> data = new LinkedHashMap<>();
-            data.put("sensor_id", sensorId);
-            data.put("vibration", vibration);
-            data.put("timestamp", Instant.now().toString());
+            SensorReadingEvent data = new SensorReadingEvent(
+                    sensorId,
+                    vibration,
+                    Instant.now().toString()
+            );
 
-            kafkaTemplate.send(TOPIC, sensorId, data);
+            publisher.publish(data);
 
             System.out.println(
                 "[KAFKA] " + sensorId +

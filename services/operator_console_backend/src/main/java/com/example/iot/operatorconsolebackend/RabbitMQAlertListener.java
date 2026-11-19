@@ -1,33 +1,35 @@
 package com.example.iot.operatorconsolebackend;
 
+import com.example.iot.operatorconsolebackend.dto.RoutedAlert;
+import com.example.iot.operatorconsolebackend.application.OperatorAlertApplicationService;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.springframework.amqp.rabbit.annotation.Queue;
 import org.springframework.amqp.rabbit.annotation.RabbitListener;
 import org.springframework.stereotype.Component;
 
 @Component
 public class RabbitMQAlertListener {
 
-    private final OperatorWebSocketHandler webSocketHandler;
-    private final PendingAlertStore pendingAlertStore;
+    private final OperatorAlertApplicationService alertService;
+    private final ObjectMapper objectMapper;
 
     public RabbitMQAlertListener(
-            OperatorWebSocketHandler webSocketHandler,
-            PendingAlertStore pendingAlertStore) {
+            OperatorAlertApplicationService alertService,
+            ObjectMapper objectMapper) {
 
-        this.webSocketHandler = webSocketHandler;
-        this.pendingAlertStore = pendingAlertStore;
+        this.alertService = alertService;
+        this.objectMapper = objectMapper;
     }
 
-    @RabbitListener(queues = "operator_alerts_queue")
-    public void receiveAlert(String message) {
+    @RabbitListener(queuesToDeclare = @Queue(value = "operator_alerts_queue", durable = "true"))
+    public void receiveAlert(String message) throws Exception {
+
+        RoutedAlert alert = objectMapper.readValue(message, RoutedAlert.class);
 
         System.out.println(
-                "[RABBITMQ] Alerta recibida: " + message
+                "[RABBITMQ] Alerta recibida: " + alert.alertId()
         );
 
-        // Guardar la alerta temporalmente
-        pendingAlertStore.addAlert(message);
-
-        // Enviar la alerta a los operadores conectados
-        webSocketHandler.broadcastAlert(message);
+        alertService.receive(alert);
     }
 }

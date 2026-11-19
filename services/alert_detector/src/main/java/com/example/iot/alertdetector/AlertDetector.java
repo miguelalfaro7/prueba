@@ -1,33 +1,46 @@
 
 package com.example.iot.alertdetector;
 
-import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.example.iot.alertdetector.domain.SensorClassification;
+import com.example.iot.alertdetector.domain.SensorReading;
+import com.example.iot.alertdetector.domain.SensorState;
+import com.example.iot.alertdetector.dto.SensorAlert;
+import com.example.iot.alertdetector.dto.SensorReadingEvent;
+import com.example.iot.alertdetector.dto.SensorStatusEvent;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.kafka.annotation.KafkaListener;
-import org.springframework.kafka.core.KafkaTemplate;
+import com.example.iot.alertdetector.domain.AlertId;
+import com.example.iot.alertdetector.domain.WindowEvaluation;
 import org.springframework.stereotype.Component;
 
 import java.time.Instant;
-import java.util.ArrayDeque;
-import java.util.Deque;
-import java.util.HashMap;
-import java.util.LinkedHashMap;
-import java.util.Map;
 
 @Component
 public class AlertDetector {
 
-    private final KafkaTemplate<String, Object> kafkaTemplate;
-    private final ObjectMapper objectMapper;
+    private static final Logger log = LoggerFactory.getLogger(AlertDetector.class);
+    private static final String SENSOR_STATUS_TOPIC = "sensor_status";
+    private static final String CRITICAL_ALERTS_TOPIC = "alerts_critical";
+    private static final String WARNING_ALERTS_TOPIC = "alerts_warning";
 
-    private final Map<String, Deque<Double>> sensorWindows =
-            new HashMap<>();
+    private final SensorEventPublisher events;
+    private final WindowEvaluation evaluation;
+    private final ObjectMapper objectMapper;
+    private final ConcurrentHashMap<String, SensorState> sensorStates =
+            new ConcurrentHashMap<>();
 
     public AlertDetector(
-            KafkaTemplate<String, Object> kafkaTemplate) {
+            SensorEventPublisher events,
+            ObjectMapper objectMapper, WindowEvaluation evaluation) {
 
-        this.kafkaTemplate = kafkaTemplate;
-        this.objectMapper = new ObjectMapper();
+        this.events = events;
+        this.evaluation = evaluation;
+        this.objectMapper = objectMapper;
     }
 
     @KafkaListener(
@@ -37,98 +50,99 @@ public class AlertDetector {
     public void processSensorData(String message) {
 
         try {
-            JsonNode data = objectMapper.readTree(message);
+            SensorReadingEvent event = objectMapper.readValue(
+                    message,
+                    SensorReadingEvent.class
+            );
+            if (event == null) {
+                throw new IllegalArgumentException("El evento de lectura es obligatorio");
+            }
 
-            String sensorId = data.get("sensor_id").asText();
-            double vibration = data.get("vibration").asDouble();
-
-            Deque<Double> window = sensorWindows.computeIfAbsent(
-                    sensorId,
-                    key -> new ArrayDeque<>()
+            SensorReading reading = new SensorReading(
+                    event.sensorId(),
+                    event.vibration()
+            );
+            SensorState state = sensorStates.computeIfAbsent(
+                    reading.sensorId(),
+                    sensorId -> new SensorState(sensorId, evaluation)
             );
 
-            window.addLast(vibration);
+            synchronized (state) {
+                SensorClassification classification = state.process(reading);
 
-            if (window.size() > 3) {
-                window.removeFirst();
-            }
-
-            System.out.println(
-                    "[DETECTOR] " + sensorId +
-                    " -> Vibracion: " + vibration
-            );
-
-            // Publicar cada lectura para el monitoreo en tiempo real
-            String status = "NORMAL";
-
-            if (vibration > 90) {
-                status = "CRITICAL";
-            } else if (
-                    window.size() == 3 &&
-                    window.stream().allMatch(value -> value > 75)
-            ) {
-                status = "WARNING";
-            }
-
-            Map<String, Object> sensorStatus = new LinkedHashMap<>();
-
-            sensorStatus.put("sensor_id", sensorId);
-            sensorStatus.put("vibration", vibration);
-            sensorStatus.put("status", status);
-            sensorStatus.put("timestamp", Instant.now().toString());
-
-            kafkaTemplate.send("sensor_status", sensorId, sensorStatus);
-
-            if (vibration > 90) {
-
-                publishAlert(
-                        sensorId,
-                        vibration,
-                        "CRITICAL",
-                        "alerts_critical"
+                log.info(
+                        "[DETECTOR] {} -> Vibracion: {}",
+                        reading.sensorId(),
+                        reading.vibration()
                 );
 
-            } else if (
-                    window.size() == 3 &&
-                    window.stream().allMatch(value -> value > 75)
-            ) {
-
-                publishAlert(
-                        sensorId,
-                        vibration,
-                        "WARNING",
-                        "alerts_warning"
+                SensorStatusEvent sensorStatus = new SensorStatusEvent(
+                        reading.sensorId(),
+                        reading.vibration(),
+                        classification.name(),
+                        Instant.now().toString()
                 );
 
-                window.clear();
+                publish(SENSOR_STATUS_TOPIC, reading.sensorId(), sensorStatus);
+
+                if (classification != SensorClassification.NORMAL) {
+                    publishAlert(reading, classification);
+                }
+
+                if (classification == SensorClassification.WARNING) {
+                    state.completeWarningPublication();
+                }
             }
 
+        } catch (JsonProcessingException | IllegalArgumentException e) {
+            log.warn("[DETECTOR] Mensaje de sensor invalido; se ignora: {}", e.getMessage());
         } catch (Exception e) {
-            System.err.println(
-                    "Error procesando mensaje: " + e.getMessage()
-            );
+            // Mantiene el manejo actual del listener: registrar el fallo sin cambiar el ack.
+            log.error("[DETECTOR] Error interno procesando mensaje de sensor", e);
         }
     }
 
-    private void publishAlert(
-            String sensorId,
-            double vibration,
-            String type,
-            String topic) {
+    private void publishAlert(SensorReading reading, SensorClassification classification) {
 
-        Map<String, Object> alert = new LinkedHashMap<>();
+        String topic = switch (classification) {
+            case CRITICAL -> CRITICAL_ALERTS_TOPIC;
+            case WARNING -> WARNING_ALERTS_TOPIC;
+            case NORMAL -> throw new IllegalArgumentException(
+                    "Una lectura normal no genera alerta"
+            );
+        };
 
-        alert.put("alert_id", java.util.UUID.randomUUID().toString());
-        alert.put("sensor_id", sensorId);
-        alert.put("type", type);
-        alert.put("vibration", vibration);
-        alert.put("timestamp", Instant.now().toString());
-
-        kafkaTemplate.send(topic, sensorId, alert);
-
-        System.out.println(
-                "[ALERTA " + type + "] " +
-                sensorId + " -> " + vibration
+        SensorAlert alert = new SensorAlert(
+                AlertId.create().toString(),
+                reading.sensorId(),
+                classification.name(),
+                reading.vibration(),
+                Instant.now().toString()
         );
+
+        publish(topic, reading.sensorId(), alert);
+
+        log.info(
+                "[ALERTA {}] {} -> {}",
+                classification,
+                reading.sensorId(),
+                reading.vibration()
+        );
+    }
+
+    private void publish(String topic, String sensorId, Object event) {
+        CompletableFuture<?> result = events.publish(topic, sensorId, event);
+        if (result != null) {
+            result.whenComplete((sendResult, error) -> {
+                if (error != null) {
+                    log.error(
+                            "[KAFKA] Error publicando en topic={} sensorId={}",
+                            topic,
+                            sensorId,
+                            error
+                    );
+                }
+            });
+        }
     }
 }

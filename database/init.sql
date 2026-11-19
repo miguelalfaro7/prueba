@@ -33,3 +33,27 @@ CREATE INDEX IF NOT EXISTS idx_alerts_time          ON alerts (created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_decisions_time       ON operator_decisions (decided_at DESC);
 CREATE UNIQUE INDEX IF NOT EXISTS uq_alerts_alert_id ON alerts (alert_id);
 CREATE INDEX IF NOT EXISTS idx_decisions_alert ON operator_decisions (alert_id);
+CREATE TABLE IF NOT EXISTS decision_outbox (
+    alert_id        VARCHAR(64) PRIMARY KEY,
+    payload         JSONB NOT NULL,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    sent_at         TIMESTAMPTZ
+);
+
+CREATE INDEX IF NOT EXISTS idx_decision_outbox_pending
+    ON decision_outbox (next_attempt_at, created_at) WHERE sent_at IS NULL;
+
+CREATE OR REPLACE FUNCTION reject_history_mutation() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+    RAISE EXCEPTION 'El historial industrial solo admite inserciones';
+END;
+$$;
+
+CREATE TRIGGER sensor_readings_append_only BEFORE UPDATE OR DELETE OR TRUNCATE ON sensor_readings
+    FOR EACH STATEMENT EXECUTE FUNCTION reject_history_mutation();
+CREATE TRIGGER alerts_append_only BEFORE UPDATE OR DELETE OR TRUNCATE ON alerts
+    FOR EACH STATEMENT EXECUTE FUNCTION reject_history_mutation();
+CREATE TRIGGER operator_decisions_append_only BEFORE UPDATE OR DELETE OR TRUNCATE ON operator_decisions
+    FOR EACH STATEMENT EXECUTE FUNCTION reject_history_mutation();

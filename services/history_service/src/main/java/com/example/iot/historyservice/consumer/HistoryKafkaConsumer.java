@@ -1,18 +1,14 @@
 package com.example.iot.historyservice.consumer;
 
-import com.example.iot.historyservice.entity.Alert;
-import com.example.iot.historyservice.entity.SensorReading;
-import com.example.iot.historyservice.repository.AlertRepository;
-import com.example.iot.historyservice.repository.SensorReadingRepository;
-import com.fasterxml.jackson.databind.JsonNode;
+import com.example.iot.historyservice.application.HistoryPersistenceService;
+import com.example.iot.historyservice.dto.SensorAlertEvent;
+import com.example.iot.historyservice.dto.SensorReadingEvent;
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import java.time.Instant;
-import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
+import org.springframework.dao.DataAccessException;
+import org.springframework.kafka.annotation.KafkaListener;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Value;
-import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.stereotype.Component;
 
 @Component
@@ -21,43 +17,37 @@ public class HistoryKafkaConsumer {
     private static final Logger log = LoggerFactory.getLogger(HistoryKafkaConsumer.class);
 
     private final ObjectMapper mapper;
-    private final SensorReadingRepository readings;
-    private final AlertRepository alerts;
-    private final long sampleSeconds;
-    private final Map<String, Instant> lastStored = new ConcurrentHashMap<>();
+    private final HistoryPersistenceService history;
 
-    public HistoryKafkaConsumer(ObjectMapper mapper,
-                                SensorReadingRepository readings,
-                                AlertRepository alerts,
-                                @Value("${history.readings.sample-seconds:10}") long sampleSeconds) {
+    public HistoryKafkaConsumer(ObjectMapper mapper, HistoryPersistenceService history) {
         this.mapper = mapper;
-        this.readings = readings;
-        this.alerts = alerts;
-        this.sampleSeconds = sampleSeconds;
+        this.history = history;
     }
 
     @KafkaListener(topics = "sensor_data", groupId = "history-service")
     public void onReading(String json) {
+        SensorReadingEvent event;
         try {
-            JsonNode node = mapper.readTree(json);
-            String sensorId = JsonFields.text(node, "sensor_id", "sensorId");
-            Double vibration = JsonFields.number(node, "vibration");
-            if (sensorId == null || vibration == null) {
+            event = mapper.readValue(json, SensorReadingEvent.class);
+        } catch (JsonProcessingException e) {
+            log.error("Error deserializando lectura: {}", json, e);
+            return;
+        }
+
+        try {
+            if (event == null) {
                 log.warn("Lectura ignorada, faltan campos: {}", json);
                 return;
             }
-
-            Instant recordedAt = parseInstant(JsonFields.text(node, "timestamp"));
-
-            Instant last = lastStored.get(sensorId);
-            if (last != null && recordedAt.isBefore(last.plusSeconds(sampleSeconds))) {
-                return;
+            HistoryPersistenceService.ReadingResult result = history.storeReading(
+                    event.sensorId(), event.vibration(), event.timestamp());
+            if (result == HistoryPersistenceService.ReadingResult.MISSING_FIELDS) {
+                log.warn("Lectura ignorada, faltan campos: {}", json);
             }
-            lastStored.put(sensorId, recordedAt);
-
-            readings.save(new SensorReading(sensorId, vibration, recordedAt));
+        } catch (DataAccessException e) {
+            log.error("Error de base de datos guardando lectura: {}", json, e);
         } catch (Exception e) {
-            log.error("Error guardando lectura: {}", json, e);
+            log.error("Error inesperado guardando lectura: {}", json, e);
         }
     }
 
@@ -72,27 +62,26 @@ public class HistoryKafkaConsumer {
     }
 
     private void saveAlert(String json, String severity) {
+        SensorAlertEvent event;
         try {
-            JsonNode node = mapper.readTree(json);
-            String sensorId = JsonFields.text(node, "sensor_id", "sensorId", "sensor");
-            Double value = JsonFields.number(node, "vibration", "vibration_value", "vibrationValue", "value");
-            String alertId = JsonFields.text(node, "alert_id", "alertId");
-            if (alertId != null && alerts.existsByAlertId(alertId)) {
+            event = mapper.readValue(json, SensorAlertEvent.class);
+        } catch (JsonProcessingException e) {
+            log.error("Error deserializando alerta {}: {}", severity, json, e);
+            return;
+        }
+
+        try {
+            if (event == null) {
+                log.error("Error deserializando alerta {}: mensaje JSON nulo", severity);
                 return;
             }
-            Instant occurredAt = parseInstant(JsonFields.text(node, "timestamp"));
-            alerts.save(new Alert(sensorId != null ? sensorId : "UNKNOWN", severity, value, json,
-                    alertId, occurredAt));
+            history.storeAlert(
+                    event.sensorId(), event.vibration(), event.alertId(),
+                    event.timestamp(), severity, json);
+        } catch (DataAccessException e) {
+            log.error("Error de base de datos guardando alerta {}: {}", severity, json, e);
         } catch (Exception e) {
-            log.error("Error guardando alerta {}: {}", severity, json, e);
-        }
-    }
-
-    private Instant parseInstant(String text) {
-        try {
-            return text != null ? Instant.parse(text) : Instant.now();
-        } catch (Exception e) {
-            return Instant.now();
+            log.error("Error inesperado guardando alerta {}: {}", severity, json, e);
         }
     }
 }

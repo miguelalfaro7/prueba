@@ -1,7 +1,9 @@
 package com.example.iot.maintenanceworker;
 
-import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.example.iot.maintenanceworker.dto.DecisionAction;
+import com.example.iot.maintenanceworker.dto.OperatorDecision;
+import org.springframework.amqp.rabbit.annotation.Queue;
 import org.springframework.amqp.rabbit.annotation.RabbitListener;
 import org.springframework.stereotype.Component;
 
@@ -14,47 +16,44 @@ public class MaintenanceDecisionConsumer {
         this.objectMapper = objectMapper;
     }
 
-    @RabbitListener(queues = "maintenance_actions_queue")
+    @RabbitListener(queuesToDeclare = @Queue(value = "maintenance_queue", durable = "true"))
     public void receiveDecision(String message) throws Exception {
 
-        JsonNode decision = objectMapper.readTree(message);
+        OperatorDecision decision = objectMapper.readValue(
+                message,
+                OperatorDecision.class
+        );
 
-        String alertId = decision.path("alert_id").asText();
-        String sensorId = decision.path("sensor_id").asText();
-        String action = decision.path("action").asText();
-
-        if (alertId.isBlank() || sensorId.isBlank()) {
+        if (!decision.hasIdentity() || decision.action() == null) {
             throw new IllegalArgumentException(
-                "La decision no contiene una alerta o sensor valido"
+                "La decision no contiene alerta, sensor o accion validos"
             );
         }
 
         System.out.println("[RABBITMQ] Decision recibida: " + message);
 
-        switch (action) {
+        switch (decision.action()) {
 
-            case "PROGRAMAR_MANTENIMIENTO_AHORA":
+            case PROGRAMAR_MANTENIMIENTO_AHORA:
                 System.out.println(
                     "[MANTENIMIENTO] Solicitud de mantenimiento inmediato para: "
-                    + sensorId
+                    + decision.sensorId()
                 );
                 break;
 
-            case "RECONOCER_Y_ESPERAR_24H":
+            case RECONOCER_Y_ESPERAR_24H:
                 System.out.println(
-                    "[MANTENIMIENTO] Alerta reconocida. Espera de 24 horas para: "
-                    + sensorId
+                    "[MANTENIMIENTO] Ejecutando mantenimiento diferido para: "
+                    + decision.sensorId()
                 );
                 break;
 
             default:
-                throw new IllegalArgumentException(
-                    "Accion no reconocida: " + action
-                );
+                throw new IllegalArgumentException("Accion no aplicable a mantenimiento: " + decision.action());
         }
 
         System.out.println(
-            "[MANTENIMIENTO] Decision procesada para alerta: " + alertId
+            "[MANTENIMIENTO] Decision procesada para alerta: " + decision.alertId()
         );
     }
 }

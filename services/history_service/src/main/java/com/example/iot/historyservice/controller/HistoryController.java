@@ -1,12 +1,13 @@
 package com.example.iot.historyservice.controller;
 
-import com.example.iot.historyservice.entity.Alert;
-import com.example.iot.historyservice.entity.OperatorDecision;
-import com.example.iot.historyservice.entity.SensorReading;
+import com.example.iot.historyservice.dto.AlertResponse;
+import com.example.iot.historyservice.dto.OperatorDecisionResponse;
+import com.example.iot.historyservice.dto.SensorReadingResponse;
 import com.example.iot.historyservice.repository.AlertRepository;
 import com.example.iot.historyservice.repository.OperatorDecisionRepository;
 import com.example.iot.historyservice.repository.SensorReadingRepository;
 import java.util.List;
+import java.util.stream.Collectors;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
 import org.springframework.web.bind.annotation.CrossOrigin;
@@ -33,30 +34,47 @@ public class HistoryController {
     }
 
     @GetMapping("/alerts")
-    public List<Alert> alerts(@RequestParam(required = false) String sensorId,
-                              @RequestParam(defaultValue = "50") int limit) {
+    public List<AlertResponse> alerts(@RequestParam(required = false) String sensorId,
+                                      @RequestParam(defaultValue = "50") int limit) {
         Pageable page = PageRequest.of(0, clamp(limit));
-        return sensorId == null
+        return (sensorId == null
                 ? alerts.findAllByOrderByCreatedAtDesc(page)
-                : alerts.findBySensorIdOrderByCreatedAtDesc(sensorId, page);
+                : alerts.findBySensorIdOrderByCreatedAtDesc(sensorId, page))
+                .stream()
+                .map(alert -> new AlertResponse(
+                        alert.getId(), alert.getAlertId(), alert.getSensorId(), alert.getSeverity(),
+                        alert.getVibrationValue(), alert.getOccurredAt(), alert.getPayload(),
+                        alert.getCreatedAt()))
+                .collect(Collectors.toList());
     }
 
     @GetMapping("/decisions")
-    public List<OperatorDecision> decisions(@RequestParam(required = false) String sensorId,
-                                            @RequestParam(defaultValue = "50") int limit) {
+    public List<OperatorDecisionResponse> decisions(@RequestParam(required = false) String sensorId,
+                                                    @RequestParam(defaultValue = "50") int limit) {
         Pageable page = PageRequest.of(0, clamp(limit));
-        return sensorId == null
+        return (sensorId == null
                 ? decisions.findAllByOrderByDecidedAtDesc(page)
-                : decisions.findBySensorIdOrderByDecidedAtDesc(sensorId, page);
+                : decisions.findBySensorIdOrderByDecidedAtDesc(sensorId, page))
+                .stream()
+                .map(decision -> new OperatorDecisionResponse(
+                        decision.getId(), decision.getAlertId(), decision.getSensorId(),
+                        decision.getAction(), decision.getRoutingKey(), decision.getPayload(),
+                        decision.getDecidedAt()))
+                .collect(Collectors.toList());
     }
 
     @GetMapping("/readings")
-    public List<SensorReading> readings(@RequestParam(required = false) String sensorId,
-                                        @RequestParam(defaultValue = "50") int limit) {
+    public List<SensorReadingResponse> readings(@RequestParam(required = false) String sensorId,
+                                                @RequestParam(defaultValue = "50") int limit) {
         Pageable page = PageRequest.of(0, clamp(limit));
-        return sensorId == null
+        return (sensorId == null
                 ? readings.findAllByOrderByRecordedAtDesc(page)
-                : readings.findBySensorIdOrderByRecordedAtDesc(sensorId, page);
+                : readings.findBySensorIdOrderByRecordedAtDesc(sensorId, page))
+                .stream()
+                .map(reading -> new SensorReadingResponse(
+                        reading.getId(), reading.getSensorId(), reading.getVibration(),
+                        reading.getRecordedAt(), reading.getStoredAt()))
+                .collect(Collectors.toList());
     }
 
     private int clamp(int limit) {

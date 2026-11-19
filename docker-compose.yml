@@ -1,35 +1,184 @@
+name: iot-industrial-local
+
+x-postgres-env: &postgres-env
+  POSTGRES_DB: ${POSTGRES_DB:-iot_history}
+  POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER must be set in .env}
+  POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}
+
+x-java-service: &java-service
+  restart: unless-stopped
+  deploy:
+    resources:
+      limits: &java-limits
+        cpus: "0.50"
+        memory: 384M
+
+x-kafka-env: &kafka-env
+  KAFKA_BOOTSTRAP_SERVERS: kafka:19092
+
+x-rabbit-env: &rabbit-env
+  RABBITMQ_HOST: rabbitmq
+  RABBITMQ_PORT: 5672
+  RABBITMQ_USER: ${RABBITMQ_USER:?RABBITMQ_USER must be set in .env}
+  RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD:?RABBITMQ_PASSWORD must be set in .env}
+
 services:
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.9.0
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+    volumes:
+      - zookeeper_data:/var/lib/zookeeper/data
+      - zookeeper_log:/var/lib/zookeeper/log
+
   kafka:
-    image: apache/kafka:3.9.1
-    hostname: kafka
-    ports:
-      - "9092:9092"
+    image: confluentinc/cp-kafka:7.9.0
+    depends_on: [zookeeper]
     environment:
-      KAFKA_NODE_ID: 1
-      KAFKA_PROCESS_ROLES: broker,controller
-      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
-      KAFKA_LISTENERS: CONTROLLER://:9093,PLAINTEXT://:19092,PLAINTEXT_HOST://:9092
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:19092,PLAINTEXT_HOST://localhost:9092
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
-      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
-      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENERS: PLAINTEXT://:19092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:19092
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
-      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
-      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
-      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_NUM_PARTITIONS: 3
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
     volumes:
-      - kafka_data:/var/lib/kafka/data
+      - assignment_kafka_data:/var/lib/kafka/data
+
   rabbitmq:
-    image: rabbitmq:3.13-management
-    hostname: rabbitmq
-    ports:
-      - "5672:5672"
-      - "15672:15672"
+    build: ./infra/rabbitmq
     environment:
-      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER}
-      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD}
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:?RABBITMQ_USER must be set in .env}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:?RABBITMQ_PASSWORD must be set in .env}
     volumes:
-      - rabbitmq_data:/var/lib/rabbitmq
+      - assignment_rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "check_running"]
+      interval: 5s
+      timeout: 5s
+      retries: 24
+
+  postgres:
+    networks: [database]
+    image: postgres:16
+    environment: *postgres-env
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./database/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\" -h 127.0.0.1"]
+      interval: 5s
+      timeout: 5s
+      retries: 24
+    deploy:
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 512M
+
+  sensor_producer:
+    <<: *java-service
+    build: ./services/sensor_producer
+    environment: *kafka-env
+    depends_on: [kafka]
+
+  alert_detector:
+    <<: *java-service
+    build: ./services/alert_detector
+    environment: *kafka-env
+    depends_on: [kafka]
+
+  alert_router:
+    <<: *java-service
+    build: ./services/alert_router
+    environment:
+      <<: [*kafka-env, *rabbit-env]
+    depends_on:
+      kafka:
+        condition: service_started
+      rabbitmq:
+        condition: service_healthy
+
+  plant_monitor_backend:
+    ports: ["127.0.0.1:${IOT_PLANT_PORT:-8081}:8081"]
+    <<: *java-service
+    build: ./services/plant_monitor_backend
+    environment: *kafka-env
+    depends_on: [kafka]
+
+  operator_console_backend:
+    ports: ["127.0.0.1:${IOT_OPERATOR_PORT:-8082}:8082"]
+    <<: *java-service
+    build: ./services/operator_console_backend
+    environment:
+      <<: [*kafka-env, *rabbit-env]
+      SERVER_PORT: 8082
+    depends_on:
+      kafka:
+        condition: service_started
+      rabbitmq:
+        condition: service_healthy
+
+  action_dispatcher:
+    networks: [default, database]
+    ports: ["127.0.0.1:${IOT_DISPATCH_PORT:-8083}:8083"]
+    <<: *java-service
+    build: ./services/action_dispatcher
+    environment:
+      <<: [*postgres-env, *rabbit-env]
+      POSTGRES_HOST: postgres
+      IOT_MAINTENANCE_DELAY: ${IOT_MAINTENANCE_DELAY:-24h}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
+  actuator_worker:
+    <<: *java-service
+    build: ./services/actuator_worker
+    environment: *rabbit-env
+    depends_on: [action_dispatcher]
+    deploy: &worker-deploy
+      replicas: 2
+      resources:
+        limits: *java-limits
+
+  maintenance_worker:
+    <<: *java-service
+    build: ./services/maintenance_worker
+    environment: *rabbit-env
+    depends_on: [action_dispatcher]
+    deploy: *worker-deploy
+
+  history_service:
+    networks: [default, database]
+    ports: ["127.0.0.1:${IOT_HISTORY_PORT:-8090}:8090"]
+    <<: *java-service
+    build: ./services/history_service
+    environment:
+      <<: [*kafka-env, *postgres-env]
+      POSTGRES_HOST: postgres
+    depends_on:
+      kafka:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 512M
+
+networks:
+  default:
+    driver: bridge
+  database:
+    internal: true
+
 volumes:
-  kafka_data:
-  rabbitmq_data:
+  assignment_kafka_data:
+  assignment_rabbitmq_data:
+  pgdata:
+  zookeeper_data:
+  zookeeper_log:

@@ -190,6 +190,35 @@
             padding: 15px 0;
         }
 
+        .pagination {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            flex-wrap: wrap;
+            gap: 12px;
+            margin-top: 16px;
+            padding-top: 14px;
+            border-top: 1px solid var(--border);
+        }
+
+        .pagination-status {
+            flex: 1;
+            min-width: 140px;
+            color: var(--muted);
+            font-size: 13px;
+            text-align: center;
+        }
+
+        .pagination-controls {
+            display: flex;
+            gap: 8px;
+        }
+
+        .pagination button {
+            min-width: 94px;
+            padding: 8px 12px;
+        }
+
         .panel + .panel {
             margin-top: 22px;
         }
@@ -211,6 +240,14 @@
 
             .stats, .sensors {
                 grid-template-columns: 1fr;
+            }
+
+            .pagination {
+                justify-content: center;
+            }
+
+            .pagination-status {
+                flex-basis: 100%;
             }
         }
     </style>
@@ -250,17 +287,33 @@
         </div>
 
         <div class="card">
-            <span>Alertas críticas</span>
+            <span>Alertas cr&iacute;ticas</span>
             <strong id="criticalSensors">--</strong>
         </div>
     </section>
 
     <div class="layout">
 
-        <section class="panel">
-            <h2>Monitoreo de sensores</h2>
-            <div class="sensors" id="sensorGrid"></div>
-        </section>
+        <div>
+            <section class="panel">
+                <h2>Monitoreo de sensores</h2>
+                <div class="sensors" id="sensorGrid"></div>
+            </section>
+
+            <section class="panel">
+                <h2>Historial de decisiones</h2>
+                <div id="decisionHistory">
+                    <p class="empty">Todav&iacute;a no se han tomado decisiones.</p>
+                </div>
+                <div class="pagination" id="decisionPagination" aria-label="Paginaci&oacute;n del historial de decisiones">
+                    <span class="pagination-status" aria-live="polite">P&aacute;gina 0 de 0 &middot; 0 registros</span>
+                    <div class="pagination-controls">
+                        <button type="button" data-page-previous disabled>Anterior</button>
+                        <button type="button" data-page-next disabled>Siguiente</button>
+                    </div>
+                </div>
+            </section>
+        </div>
 
         <div>
             <section class="panel">
@@ -269,6 +322,13 @@
                     <p class="empty">
                         Esperando alertas del sistema...
                     </p>
+                </div>
+                <div class="pagination" id="alertsPagination" aria-label="Paginaci&oacute;n de alertas recientes">
+                    <span class="pagination-status" aria-live="polite">P&aacute;gina 0 de 0 &middot; 0 registros</span>
+                    <div class="pagination-controls">
+                        <button type="button" data-page-previous disabled>Anterior</button>
+                        <button type="button" data-page-next disabled>Siguiente</button>
+                    </div>
                 </div>
             </section>
 
@@ -280,11 +340,11 @@
                     </p>
                 </div>
 
-                <div class="section">
-                    <h2>Historial de decisiones</h2>
-
-                    <div id="decisionHistory">
-                        <p class="empty">Todavía no se han tomado decisiones.</p>
+                <div class="pagination" id="operatorPagination" aria-label="Paginaci&oacute;n de la consola del operador">
+                    <span class="pagination-status" aria-live="polite">P&aacute;gina 0 de 0 &middot; 0 registros</span>
+                    <div class="pagination-controls">
+                        <button type="button" data-page-previous disabled>Anterior</button>
+                        <button type="button" data-page-next disabled>Siguiente</button>
                     </div>
                 </div>
             </section>
@@ -295,8 +355,69 @@
 </main>
 
 <script>
-    const HISTORY_API_BASE = "http://localhost:8090";
+    const portOverrides = new URLSearchParams(window.location.search);
+    function localPort(name, fallback) {
+        const value = portOverrides.get(name);
+        return /^\d{1,5}$/.test(value ?? "") && Number(value) >= 1 && Number(value) <= 65535
+            ? Number(value) : fallback;
+    }
+    const PLANT_WS = `ws://localhost:${localPort("plant", 8081)}/ws/plant`;
+    const OPERATOR_WS = `ws://localhost:${localPort("operator", 8082)}/ws/operator`;
+    const DISPATCH_URL = `http://localhost:${localPort("dispatch", 8083)}/decide`;
+    const HISTORY_API_BASE = `http://localhost:${localPort("history", 8090)}`;
     const displayedPlantAlertIds = new Set();
+    const alertPagination = { page: 1, pageSize: 5 };
+    const operatorPagination = { page: 1, pageSize: 5 };
+    const decisionPagination = { page: 1, pageSize: 5 };
+
+    function renderPagination(containerId, paginationId, state, resetToFirstPage = false) {
+        const container = document.getElementById(containerId);
+        const pagination = document.getElementById(paginationId);
+        const items = Array.from(container.querySelectorAll("[data-page-item]"));
+        const totalPages = Math.ceil(items.length / state.pageSize);
+
+        if (resetToFirstPage) {
+            state.page = 1;
+        }
+
+        state.page = totalPages === 0
+            ? 1
+            : Math.min(Math.max(state.page, 1), totalPages);
+
+        const firstVisibleIndex = (state.page - 1) * state.pageSize;
+        const endVisibleIndex = firstVisibleIndex + state.pageSize;
+
+        items.forEach((item, index) => {
+            item.hidden = index < firstVisibleIndex || index >= endVisibleIndex;
+        });
+
+        const currentPage = totalPages === 0 ? 0 : state.page;
+        pagination.querySelector(".pagination-status").textContent =
+            `P\u00e1gina ${currentPage} de ${totalPages} \u00b7 ${items.length} registros`;
+        pagination.querySelector("[data-page-previous]").disabled = currentPage <= 1;
+        pagination.querySelector("[data-page-next]").disabled =
+            totalPages === 0 || currentPage >= totalPages;
+    }
+
+    function bindPagination(containerId, paginationId, state) {
+        const pagination = document.getElementById(paginationId);
+
+        pagination.querySelector("[data-page-previous]").addEventListener("click", () => {
+            state.page -= 1;
+            renderPagination(containerId, paginationId, state);
+        });
+
+        pagination.querySelector("[data-page-next]").addEventListener("click", () => {
+            state.page += 1;
+            renderPagination(containerId, paginationId, state);
+        });
+
+        renderPagination(containerId, paginationId, state);
+    }
+
+    bindPagination("alertsContainer", "alertsPagination", alertPagination);
+    bindPagination("operatorConsole", "operatorPagination", operatorPagination);
+    bindPagination("decisionHistory", "decisionPagination", decisionPagination);
 
     const sensorGrid = document.getElementById("sensorGrid");
 
@@ -318,7 +439,7 @@
             </div>
 
             <div class="sensor-value">--</div>
-            <small class="muted">Vibración</small>
+            <small class="muted">Vibraci&oacute;n</small>
         `;
 
         sensorGrid.appendChild(card);
@@ -331,7 +452,7 @@
     function connectPlantMonitor() {
 
         plantSocket = new WebSocket(
-            "ws://localhost:8081/ws/plant"
+            PLANT_WS
         );
 
         plantSocket.onopen = () => {
@@ -366,11 +487,11 @@
         };
 
         plantSocket.onerror = (error) => {
-            console.error("[WEBSOCKET] Error de conexión:", error);
+            console.error("[WEBSOCKET] Error de conexi\u00f3n:", error);
         };
 
         plantSocket.onclose = () => {
-            console.warn("[WEBSOCKET] Conexión cerrada");
+            console.warn("[WEBSOCKET] Conexi\u00f3n cerrada");
 
             connectionStatus.textContent = "Planta desconectada";
             connectionStatus.style.color = "#ef4444";
@@ -398,6 +519,7 @@
         const alertElement = document.createElement("div");
 
         alertElement.className = "alert";
+        alertElement.dataset.pageItem = "true";
         if (alertId) {
             alertElement.dataset.alertId = alertId;
         }
@@ -408,14 +530,14 @@
 
         const title = document.createElement("strong");
         title.textContent = alert.type === "CRITICAL"
-            ? "ALERTA CRÍTICA"
+            ? "ALERTA CR\u00cdTICA"
             : "ADVERTENCIA";
 
         const sensor = document.createElement("p");
         sensor.textContent = `Sensor: ${alert.sensor_id}`;
 
         const vibration = document.createElement("p");
-        vibration.textContent = `Vibración: ${Number(alert.vibration).toFixed(2)}`;
+        vibration.textContent = `Vibraci\u00f3n: ${Number(alert.vibration).toFixed(2)}`;
 
         const date = document.createElement("small");
         date.textContent = new Date(
@@ -429,6 +551,8 @@
         while (container.children.length > 20) {
             container.lastElementChild.remove();
         }
+
+        renderPagination("alertsContainer", "alertsPagination", alertPagination, true);
     }
 
     async function loadPersistentHistory() {
@@ -490,12 +614,12 @@
         const statusLabels = {
             NORMAL: "NORMAL",
             WARNING: "ADVERTENCIA",
-            CRITICAL: "CRÍTICO"
+            CRITICAL: "CR\u00cdTICO"
         };
 
         statusElement.textContent = statusLabels[data.status] || data.status;
 
-        // Aplicar colores según el estado
+        // Aplicar colores segun el estado
         statusElement.classList.remove(
             "muted",
             "normal",
@@ -550,7 +674,7 @@
     let operatorSocket;
 
     function connectOperatorConsole() {
-        operatorSocket = new WebSocket("ws://localhost:8082/ws/operator");
+        operatorSocket = new WebSocket(OPERATOR_WS);
 
         operatorSocket.onopen = () => {
             console.log("[OPERADOR] Consola conectada");
@@ -576,7 +700,7 @@
 
         operatorSocket.onerror = (error) => {
             console.error(
-                "[OPERADOR] Error de conexión:",
+                "[OPERADOR] Error de conexi\u00f3n:",
                 error
             );
         };
@@ -602,6 +726,7 @@
 
         const alertElement = document.createElement("div");
         alertElement.className = "alert";
+        alertElement.dataset.pageItem = "true";
         alertElement.id = `operator-${alert.alert_id}`;
 
         if (alert.type === "CRITICAL") {
@@ -610,7 +735,7 @@
 
         const title = document.createElement("strong");
         title.textContent = alert.type === "CRITICAL"
-            ? "DECISIÓN URGENTE"
+            ? "DECISI\u00d3N URGENTE"
             : "MANTENIMIENTO REQUERIDO";
 
         const sensor = document.createElement("p");
@@ -618,7 +743,7 @@
 
         const vibration = document.createElement("p");
         vibration.textContent =
-            `Vibración: ${Number(alert.vibration).toFixed(2)}`;
+            `Vibraci\u00f3n: ${Number(alert.vibration).toFixed(2)}`;
 
         const date = document.createElement("small");
         date.textContent = new Date(alert.timestamp).toLocaleString("es-CO");
@@ -655,18 +780,19 @@
         );
 
         container.prepend(alertElement);
+        renderPagination("operatorConsole", "operatorPagination", operatorPagination, true);
     }
 
     async function sendOperatorDecision(alert, action, alertElement) {
         const buttons = alertElement.querySelectorAll("button");
 
-        // Deshabilitar botones mientras se envía la decisión
+        // Deshabilitar botones mientras se envia la decision
         buttons.forEach(button => {
             button.disabled = true;
         });
 
         try {
-            const response = await fetch("http://localhost:8083/decide", {
+            const response = await fetch(DISPATCH_URL, {
                 method: "POST",
                 headers: {
                     "Content-Type": "application/json"
@@ -682,7 +808,7 @@
                 throw new Error(`Error HTTP: ${response.status}`);
             }
 
-            console.log("[DECISIÓN] Enviada:", {
+            console.log("[DECISI\u00d3N] Enviada:", {
                 alert_id: alert.alert_id,
                 sensor_id: alert.sensor_id,
                 action: action
@@ -690,7 +816,7 @@
 
             addDecisionToHistory(alert, action);
 
-            // Eliminar la alerta después de enviar la decisión
+            // Eliminar la alerta despues de enviar la decision
             alertElement.remove();
 
             const container = document.getElementById("operatorConsole");
@@ -703,8 +829,10 @@
                 container.appendChild(emptyMessage);
             }
 
+            renderPagination("operatorConsole", "operatorPagination", operatorPagination);
+
         } catch (error) {
-            console.error("[DECISIÓN] Error al enviar:", error);
+            console.error("[DECISI\u00d3N] Error al enviar:", error);
 
             // Habilitar nuevamente los botones si ocurre un error
             buttons.forEach(button => {
@@ -712,7 +840,7 @@
             });
 
             window.alert(
-                "No se pudo enviar la decisión. Revisa la consola."
+                "No se pudo enviar la decisi\u00f3n. Revisa la consola."
             );
         }
     }
@@ -732,18 +860,19 @@
 
         const item = document.createElement("div");
         item.className = "alert";
+        item.dataset.pageItem = "true";
         if (decisionId !== null) {
             item.id = `decision-${decisionId}`;
         }
 
         const title = document.createElement("strong");
-        title.textContent = "DECISIÓN REGISTRADA";
+        title.textContent = "DECISI\u00d3N REGISTRADA";
 
         const sensor = document.createElement("p");
         sensor.textContent = `Sensor: ${alert.sensor_id}`;
 
         const decision = document.createElement("p");
-        decision.textContent = `Acción: ${action.replaceAll("_", " ")}`;
+        decision.textContent = `Acci\u00f3n: ${action.replaceAll("_", " ")}`;
 
         const date = document.createElement("small");
         date.textContent = new Date(decidedAt).toLocaleString("es-CO");
@@ -752,10 +881,12 @@
 
         container.prepend(item);
 
-        // Mantener únicamente las últimas 20 decisiones
+        // Mantener unicamente las ultimas 20 decisiones
         while (container.children.length > 20) {
             container.lastElementChild.remove();
         }
+
+        renderPagination("decisionHistory", "decisionPagination", decisionPagination, true);
     }
 
     connectOperatorConsole();

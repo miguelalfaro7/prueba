@@ -1,7 +1,9 @@
 package com.example.iot.actuatorworker;
 
-import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.example.iot.actuatorworker.dto.DecisionAction;
+import com.example.iot.actuatorworker.dto.OperatorDecision;
+import org.springframework.amqp.rabbit.annotation.Queue;
 import org.springframework.amqp.rabbit.annotation.RabbitListener;
 import org.springframework.stereotype.Component;
 
@@ -14,18 +16,17 @@ public class ActuatorDecisionConsumer {
         this.objectMapper = objectMapper;
     }
 
-    @RabbitListener(queues = "actuator_actions_queue")
+    @RabbitListener(queuesToDeclare = @Queue(value = "critical_actions_queue", durable = "true"))
     public void receiveDecision(String message) throws Exception {
 
-        JsonNode decision = objectMapper.readTree(message);
+        OperatorDecision decision = objectMapper.readValue(
+                message,
+                OperatorDecision.class
+        );
 
-        String alertId = decision.path("alert_id").asText();
-        String sensorId = decision.path("sensor_id").asText();
-        String action = decision.path("action").asText();
-
-        if (alertId.isBlank() || sensorId.isBlank()) {
+        if (!decision.hasIdentity() || decision.action() == null) {
             throw new IllegalArgumentException(
-                    "La decision no contiene una alerta o sensor valido"
+                    "La decision no contiene alerta, sensor o accion validos"
             );
         }
 
@@ -33,35 +34,33 @@ public class ActuatorDecisionConsumer {
                 "[RABBITMQ] Decision recibida: " + message
         );
 
-        switch (action) {
+        switch (decision.action()) {
 
-            case "APAGADO_INMEDIATO":
+            case APAGADO_INMEDIATO:
 
                 System.out.println(
                         "[ACTUADOR] Apagado inmediato simulado del equipo: "
-                                + sensorId
+                                + decision.sensorId()
                 );
 
                 break;
 
-            case "IGNORAR_10_MINUTOS":
+            case IGNORAR_10_MINUTOS:
 
                 System.out.println(
                         "[ACTUADOR] Se registra una pausa de 10 minutos para: "
-                                + sensorId
+                                + decision.sensorId()
                 );
 
                 break;
 
             default:
 
-                throw new IllegalArgumentException(
-                        "Accion no reconocida: " + action
-                );
+                throw new IllegalArgumentException("Accion no aplicable al actuador: " + decision.action());
         }
 
         System.out.println(
-                "[ACTUADOR] Decision procesada para alerta: " + alertId
+                "[ACTUADOR] Decision procesada para alerta: " + decision.alertId()
         );
     }
 }
